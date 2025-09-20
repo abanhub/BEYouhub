@@ -1,45 +1,81 @@
-﻿import { Router } from "express";
-import { proxyInnerTube } from "./innerTube.js";
-import { transformResponse } from "./transformers.js";
+import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 
-const router = Router();
+import { proxyInnerTube } from './innerTube.js';
+import { transformResponse } from './transformers.js';
 
-function buildPayload(req) {
-  if (req.method === "GET" || req.method === "HEAD") {
-    return { ...req.query };
+const router = new Hono();
+
+function normalizeQueries(entries) {
+  const result = {};
+  for (const [key, value] of Object.entries(entries)) {
+    if (Array.isArray(value)) {
+      result[key] = value.length > 1 ? value : value[0];
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+function getFirst(value) {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
+async function buildPayload(c, query) {
+  const method = c.req.method;
+  if (method === 'GET' || method === 'HEAD') {
+    return { ...query };
   }
 
-  if (req.is("application/json") && typeof req.body === "object" && req.body !== null) {
-    return req.body;
-  }
+  const contentType = c.req.header('content-type') || '';
 
-  if (typeof req.body === "string" && req.body.trim()) {
+  if (contentType.includes('application/json')) {
     try {
-      return JSON.parse(req.body);
+      const body = await c.req.json();
+      if (body && typeof body === 'object') {
+        return body;
+      }
+      return {};
     } catch (error) {
-      throw new Error("Invalid JSON payload");
+      throw new HTTPException(400, { message: 'Invalid JSON payload' });
+    }
+  }
+
+  const rawBody = await c.req.text();
+  if (rawBody && rawBody.trim()) {
+    try {
+      return JSON.parse(rawBody);
+    } catch (error) {
+      throw new HTTPException(400, { message: 'Invalid JSON payload' });
     }
   }
 
   return {};
 }
 
-router.all("/youtubei/v1/*", async (req, res) => {
+router.all('/youtubei/v1/:endpoint{.*}', async (c) => {
   try {
-    const endpoint = req.path.replace(/^\/youtubei\/v1\//, "");
+    const endpoint = c.req.param('endpoint');
     if (!endpoint) {
-      return res.status(400).json({ error: "Endpoint path is required" });
+      throw new HTTPException(400, { message: 'Endpoint path is required' });
     }
 
-    const payload = buildPayload(req);
+    const queries = c.req.queries();
+    const normalizedQuery = normalizeQueries(queries);
+    const payload = await buildPayload(c, normalizedQuery);
+
     const locale = {
-      hl: req.query.hl || payload?.context?.client?.hl,
-      gl: req.query.gl || payload?.context?.client?.gl
+      hl: getFirst(queries.hl) || payload?.context?.client?.hl,
+      gl: getFirst(queries.gl) || payload?.context?.client?.gl
     };
 
-    const videoId = req.query.videoId || payload.videoId;
-    const useMusic = endpoint.startsWith("music/");
-    const raw = req.query.raw === "true" || req.query.raw === "1";
+    const videoId = getFirst(queries.videoId) || payload.videoId;
+    const useMusic = endpoint.startsWith('music/');
+    const raw = ['true', '1'].includes((getFirst(queries.raw) || '').toLowerCase());
 
     const response = await proxyInnerTube({
       endpoint,
@@ -49,30 +85,32 @@ router.all("/youtubei/v1/*", async (req, res) => {
       useMusic
     });
 
-    if (typeof response === "string") {
-      return res.type("text/plain").send(response);
+    if (typeof response === 'string') {
+      return c.text(response);
     }
 
     if (raw) {
-      return res.json(response);
+      return c.json(response);
     }
 
     const transformed = transformResponse(endpoint, response, payload);
-    res.json(transformed ?? response);
+    return c.json(transformed ?? response);
   } catch (error) {
+    if (error instanceof HTTPException) {
+      throw error;
+    }
+
     const status = error.status || 500;
     if (error.data) {
-      if (typeof error.data === "string") {
-        res.status(status).type("text/plain").send(error.data);
-      } else {
-        res.status(status).json(error.data);
+      if (typeof error.data === 'string') {
+        return c.text(error.data, status);
       }
-    } else {
-      res.status(status).json({ error: error.message });
+      return c.json(error.data, status);
     }
+
+    const message = error instanceof Error ? error.message : 'Unexpected error';
+    return c.json({ error: message }, status);
   }
 });
 
 export default router;
-
-

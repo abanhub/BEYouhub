@@ -1,25 +1,35 @@
-﻿import 'dotenv/config';
-import express from "express";
-import cors from "cors";
+import 'dotenv/config';
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { cors } from 'hono/cors';
 
-import innerTubeRouter from "./routes.js";
+import innerTubeRouter from './routes.js';
 
-const app = express();
+const app = new Hono();
 
-app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use('*', cors());
 
-app.get("/", (_req, res) => {
-  res.json({
-    name: "youtubei-proxy",
-    message: "Forward requests to /youtubei/v1/{endpoint}"
-  });
-});
+app.get('/', (c) =>
+  c.json({
+    name: 'youtubei-proxy',
+    message: 'Forward requests to /youtubei/v1/{endpoint}'
+  })
+);
 
-app.use(innerTubeRouter);
+app.route('/', innerTubeRouter);
 
-const PORT = process.env.PORT || 3009;
+const PORT = Number(process.env.PORT) || 3009;
 
-app.listen(PORT, () => {
-  console.log(`YouTube InnerTube raw proxy listening on http://localhost:${PORT}`);
-});
+serve(
+  {
+    fetch: app.fetch,
+    port: PORT
+  },
+  (info) => {
+    const address = info?.address || 'localhost';
+    const displayPort = info?.port || PORT;
+    console.log(
+      'YouTube InnerTube raw proxy listening on http://' + address + ':' + displayPort
+    );
+  }
+);
